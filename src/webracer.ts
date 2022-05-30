@@ -2,7 +2,7 @@ import * as BABYLON from 'babylonjs'
 import * as GUI from 'babylonjs-gui'
 import * as tf from '@tensorflow/tfjs'
 import { BabylonFileLoaderConfiguration, float, int } from 'babylonjs'
-import { Rank, Tensor3D } from '@tensorflow/tfjs'
+import { OneHotInputs, Rank, Tensor, Tensor3D } from '@tensorflow/tfjs'
 
 export default class WebRacer {
     private canvasElement: HTMLCanvasElement
@@ -23,8 +23,10 @@ export default class WebRacer {
     private captureButton: GUI.Button
     private countdownText: GUI.TextBlock
     private captureInterval
+
+    private coinMaterial: BABYLON.StandardMaterial
     
-    private images: {[key: int]: [tf.Tensor<Rank>?]} = {}
+    private images: {[key: int]:tf.Tensor<Rank>[]} = {}
 
     constructor(canvasElementName: string) {
         this.canvasElement = document.getElementById(canvasElementName) as HTMLCanvasElement
@@ -32,24 +34,38 @@ export default class WebRacer {
         this.video = document.getElementById('webcam') as HTMLVideoElement
         this.capture = document.getElementById('capture') as HTMLCanvasElement
         this.ctx = this.capture.getContext('2d') as CanvasRenderingContext2D
-        this.controller = new NNController(this.guiTexture)
+        this.scene = new BABYLON.Scene(this.engine)
+        this.guiTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI')
+
+        this.controller = new NNController(this.guiTexture, this.classes.length)
         this.controller.loadModel()
     }
 
     public createScene() {
-        this.scene = new BABYLON.Scene(this.engine)
-        this.scene.enablePhysics(BABYLON.Vector3.Zero(), new BABYLON.CannonJSPlugin())
+        
+        this.scene.enablePhysics(new BABYLON.Vector3(0, 0, 0), new BABYLON.CannonJSPlugin())
         this.camera = new BABYLON.ArcRotateCamera('Camera', 15, -30, 10, BABYLON.Vector3.Zero(),
             this.scene)
+        
         this.camera.attachControl(this.canvasElement, true)
-        let light = new BABYLON.HemisphericLight('light', BABYLON.Vector3.Zero(), this.scene)
+        this.coinMaterial = new BABYLON.StandardMaterial('coinMaterial')
+        this.coinMaterial.diffuseColor = new BABYLON.Color3(0.9, 0.9, 0.2)
+
+        let light = new BABYLON.DirectionalLight('light', new BABYLON.Vector3(1, -1, 0), this.scene)
+        light.intensity = 1.2
+        light.specular = new BABYLON.Color3(0.99, 0.97, 0.97)
+        light.diffuse = new BABYLON.Color3(0.93, 0.93, 0.87)
+        let ambientLight = new BABYLON.HemisphericLight('ambientLight', new BABYLON.Vector3(0, -1, 0), this.scene)
+        ambientLight.diffuse = new BABYLON.Color3(0.2, 0.2, 0.6)
+        ambientLight.intensity = 2
         let ground = BABYLON.MeshBuilder.CreateGround('ground', {width:20, height:20}, this.scene)
-        let sphere = BABYLON.MeshBuilder.CreateSphere('speher', {segments:18, diameter:2}, this.scene)
-        ground.setPositionWithLocalVector(new BABYLON.Vector3(0, -5, 0))
+        ground.setPositionWithLocalVector(new BABYLON.Vector3(0, -2, 0))
+        this.addCoin()
+        
     }
 
     public showCalibration() {
-        this.guiTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI')
+        
         
         let grid = new GUI.Grid()
         this.guiTexture.addControl(grid)
@@ -58,20 +74,6 @@ export default class WebRacer {
         this.instructionImage.widthInPixels = 224
         this.instructionImage.heightInPixels = 224
         
-        /*let imgPlane = BABYLON.MeshBuilder.CreatePlane('imagePlane', {}, this.scene)
-        let mat = new BABYLON.StandardMaterial('imgMaterial', this.scene)
-        mat.diffuseTexture = tex
-        mat.specularColor = BABYLON.Color3.Black()
-        imgPlane.material = mat
-        imgPlane.position = new BABYLON.Vector3(0, 1, 0)*/
-        /*
-        setInterval(async () => {
-            let data = ctx.getImageData(0, 0, canv.width, canv.height)
-            
-            let resized = tf.browser.fromPixels(data).resizeBilinear([224, 224])
-            console.log('texture data:', data)
-            console.log('resized:', resized)
-        }, 1000)*/
         this.instructionText = new GUI.TextBlock('instructions', 'Make sure the webcam is working, \nassume the pose indicated and press "Ready"')
         this.instructionText.outlineColor = 'white'
         this.instructionText.outlineWidth = 3
@@ -103,12 +105,18 @@ export default class WebRacer {
         
         
         
-        console.log('showing calibration 2')
-        //tf.image.resizeBilinear()
+        console.log('showing calibration')
     }
 
     public addCoin() {
-        let coinMesh = BABYLON.MeshBuilder.CreateCylinder('coin', {height:0.1, diameter:1}, this.scene)
+        let coinMesh = BABYLON.MeshBuilder.CreateCylinder('coin', {height:0.2, diameter:1}, this.scene)
+        coinMesh.material = this.coinMaterial
+        coinMesh.physicsImpostor = new BABYLON.PhysicsImpostor(coinMesh, 
+            BABYLON.PhysicsImpostor.SphereImpostor, {mass:1}, this.scene)
+        coinMesh.rotate(BABYLON.Vector3.Right(), Math.PI/2)
+        
+        console.log(coinMesh.animations)
+        coinMesh.physicsImpostor.setAngularVelocity(new BABYLON.Vector3(0, Math.PI/2, 0))
         
     }
 
@@ -120,21 +128,20 @@ export default class WebRacer {
             let data = this.ctx.getImageData(0, 0, this.capture.width, this.capture.height)
             let processed = tf.browser.fromPixels(data).div(255)
             this.images[class_label].push(processed)
-            console.log('data from cam: ', processed)
-            console.log('captured', this.images[class_label].length, 'images so far')
             if (this.images[class_label].length >= n) {
                 this.currentClass += 1
                 if (this.currentClass >= this.classes.length) { //finished
                     this.currentClass = 0
                     this.instructionText.text = 'All done! Please wait for the network to train'
                     this.instructionImage.isVisible = false
+                    this.countdownText.text = 'Preparing and training net, please wait'
+                    this.controller.train(this.images)
                 }
                 else {
                     this.setInstructionImage(this.imageUrls[this.currentClass])
                     this.countdownText.isVisible = false
                     this.captureButton.isVisible = true
                     this.captureButton.isEnabled = true
-                    console.log('reenabled button')
                 }
                 clearInterval(this.captureInterval)
                 
@@ -162,15 +169,25 @@ export default class WebRacer {
 }
 
 class NNController {
-    private model 
-    private guiTexture
-    constructor(guiTexture) {
+    private model : tf.GraphModel
+    private guiTexture: GUI.AdvancedDynamicTexture
+    private trainingProgress: GUI.TextBlock
+    private trainingInputs: Tensor[]
+    private trainingOutputs: Tensor
+    private n_classes:int
+
+    constructor(guiTexture:GUI.AdvancedDynamicTexture, n_classes:int) {
         this.guiTexture = guiTexture
+        this.n_classes = n_classes
+        this.trainingProgress = new GUI.TextBlock('trainingProgress', 'progress')
+        this.guiTexture.addControl(this.trainingProgress)
+        
     }
 
     async loadModel() {
         try {
-            this.model = await tf.loadGraphModel('localstorage://mobilenet')
+            this.model = await tf.loadGraphModel('localstorage://mobilenet');
+            (this.model.predict(tf.zeros([1, 224, 224, 3])) as Tensor).dispose()
             console.log('loaded model: ', this.model)
         }
         catch (e) {
@@ -178,6 +195,7 @@ class NNController {
             this.model = await tf.loadGraphModel(
                 'https://tfhub.dev/google/tfjs-model/imagenet/mobilenet_v3_small_100_224/feature_vector/5/default/1',
                 {fromTFHub: true})
+            ;(this.model.predict(tf.zeros([1, 224, 224, 3])) as Tensor).dispose()
             console.log('loaded model: ', this.model)
             
         }
@@ -187,7 +205,24 @@ class NNController {
 
     }
 
-    train(trainData:{int:[ImageData]}) {
+    async train(trainData:{[key: number]:Tensor[]}) {
+        this.trainingInputs = []
+        let outputs: number[] = []
+        if (!this.guiTexture.getControlByName('trainingProgress')) {
+            this.guiTexture.addControl(this.trainingProgress)
+        }
+        for (let k in trainData) {
+            for (let imgData of trainData[k]) {
+                let trainTensor = tf.tidy(() => {
+                    return (this.model.predict(imgData.expandDims()) as Tensor).squeeze()
+
+                })
+                this.trainingInputs.push(trainTensor)
+                outputs.push(parseInt(k))
+                await tf.nextFrame()
+            }
+        }
+        this.trainingOutputs = tf.oneHot(outputs, this.n_classes)
 
     }
 
